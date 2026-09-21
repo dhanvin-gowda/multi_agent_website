@@ -3,14 +3,18 @@ import next from "next";
 import { MongoClient, ObjectId } from "mongodb";
 import jwt from "jsonwebtoken";
 import { WebSocketServer } from "ws";
+import { MossClient } from "@moss-js/moss";
 
 const port = Number(process.env.PORT || 3000);
 const dev = !process.argv.includes("--production") && process.env.NODE_ENV !== "production";
 const app = next({ dev });
 const handle = app.getRequestHandler();
+const MOSS_INDEX_NAME = "team-chat";
 let handleUpgrade;
 let mongoClient;
 let database;
+let mossClient;
+function getMossClient() { if (!mossClient) mossClient = new MossClient(process.env.MOSS_PROJECT_ID, process.env.MOSS_PROJECT_KEY); return mossClient; }
 
 function getDatabase() { if (!database) database = mongoClient.db("workspace_chat"); return database; }
 async function ensureDatabase() { mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000 }); await mongoClient.connect(); await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true }); }
@@ -36,16 +40,35 @@ const httpServer = createServer(async (request, response) => {
 			const user = result.value || result; return sendJson(response, 200, { token: signUser(user), user: profile(user) });
 		}
 		if (url.pathname === "/api/auth/me" && request.method === "GET") { const user = await userFromToken(bearerToken(request)); return user ? sendJson(response, 200, { user }) : sendJson(response, 401, { error: "Session expired." }); }
+		if (url.pathname === "/api/chat/sync" && request.method === "POST") {
+			const user = await userFromToken(bearerToken(request));
+			if (!user) return sendJson(response, 401, { error: "Session expired." });
+			if (!process.env.MOSS_PROJECT_ID || !process.env.MOSS_PROJECT_KEY) return sendJson(response, 500, { error: "MOSS credentials are not configured." });
+			const messages = await getDatabase().collection("messages").find({}).sort({ createdAt: 1 }).toArray();
+			if (messages.length === 0) return sendJson(response, 200, { ok: true, indexed: 0, jobId: null });
+			const docs = messages.map((message) => ({ id: String(message._id), text: `${message.sender}: ${message.text}`, metadata: { sender: String(message.sender), senderId: String(message.senderId), time: String(message.time) } }));
+			const client = getMossClient();
+			const indexes = await client.listIndexes();
+			const exists = indexes.some((index) => index.name === MOSS_INDEX_NAME);
+			const result = exists ? await client.addDocs(MOSS_INDEX_NAME, docs, { upsert: true }) : await client.createIndex(MOSS_INDEX_NAME, docs);
+			return sendJson(response, 200, { ok: true, indexed: docs.length, jobId: result.jobId });
+		}
 		return handle(request, response);
 	} catch (error) { console.error(error); sendJson(response, 500, { error: "The server could not process that request." }); }
 });
 
 const socketServer = new WebSocketServer({ noServer: true });
-const clients = new Set();
+const clients = new Map();
+function broadcastPresence() {
+	const members = [...new Map([...clients.values()].map((user) => [user.id, { ...user, online: true }])).values()];
+	const payload = JSON.stringify({ type: "presence", members });
+	for (const client of clients.keys()) if (client.readyState === 1) client.send(payload);
+}
 socketServer.on("connection", (socket, user) => {
-	clients.add(socket);
-	socket.on("message", (rawMessage) => { try { const payload = JSON.parse(rawMessage.toString()); if (payload.type !== "message" || !payload.message?.text) return; payload.message.senderId = user.id; payload.message.sender = user.name; payload.message.initials = user.initials; payload.message.color = user.color; const outgoing = JSON.stringify({ type: "message", message: payload.message }); for (const client of clients) if (client.readyState === 1) client.send(outgoing); } catch { /* Ignore malformed client payloads. */ } });
-	socket.on("close", () => clients.delete(socket));
+	clients.set(socket, user);
+	broadcastPresence();
+	socket.on("message", (rawMessage) => { try { const payload = JSON.parse(rawMessage.toString()); if (payload.type !== "message" || !payload.message?.text) return; payload.message.senderId = user.id; payload.message.sender = user.name; payload.message.initials = user.initials; payload.message.color = user.color; const outgoing = JSON.stringify({ type: "message", message: payload.message }); for (const client of clients.keys()) if (client.readyState === 1) client.send(outgoing); getDatabase().collection("messages").insertOne({ _id: payload.message.id, senderId: user.id, sender: user.name, initials: user.initials, color: user.color, time: payload.message.time, text: payload.message.text, createdAt: new Date() }).catch((error) => { if (error?.code !== 11000) console.error("Failed to persist message:", error); }); } catch { /* Ignore malformed client payloads. */ } });
+	socket.on("close", () => { clients.delete(socket); broadcastPresence(); });
 });
 httpServer.on("upgrade", async (request, socket, head) => {
 	const requestUrl = new URL(request.url || "/", `http://${request.headers.host}`);

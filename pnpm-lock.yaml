@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@moss-js/moss':
+        specifier: ^1.12.0
+        version: 1.12.0
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
@@ -387,6 +390,46 @@ packages:
 
   '@mongodb-js/saslprep@1.5.4':
     resolution: {integrity: sha512-05UC0jQsjKAOuXQ0H9Ud9vUTJpZIg+n/FinpR30tI5I8pY2inTfPOZ5OF/cg3Ce/N9MoD1xhRCeOsJtuTbFYlw==}
+
+  '@moss-js/moss-core-darwin-arm64@0.27.0':
+    resolution: {integrity: sha512-7HimYnrwfDzK412WiT4Ys+NHCgG0NMmzL5v8EFUSOjuoZRr4/NNP4qUYqX1baV3gj8LGtTDsTM77dyHAtfJt8g==}
+    engines: {node: '>=20'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@moss-js/moss-core-darwin-x64@0.27.0':
+    resolution: {integrity: sha512-eMw35JTo5NDw1ha5uY7n0IPJzQ7pB6ls+d4UAlil68Gf/aWg4psLX3LAXrC93fKDRrRR2mOKkzroF772pTXjjw==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@moss-js/moss-core-linux-arm64-gnu@0.27.0':
+    resolution: {integrity: sha512-yDhAEX/7usJ4QWpd6ILGYvWqj7UmNjd13a8VrxNKdsqz9YL1a0TOdWzavGFnskk5KEhWLVqVEEdp1DyZ4xyU6Q==}
+    engines: {node: '>=20'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@moss-js/moss-core-linux-x64-gnu@0.27.0':
+    resolution: {integrity: sha512-/AfrfMetZifQb2H+qxncBBa36+u1FEa2VEKlZBfT/TZ4jlaB+wFIEE9q0xWA/E5cRnC9kWkL+IWo4pDaO/c4UA==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@moss-js/moss-core-win32-x64-msvc@0.27.0':
+    resolution: {integrity: sha512-Gj1HPgViX6jZBgvLB2QTFuVaXdvdDJPtZTRu97GXbAUIGnCGoX7xXP8J5OpAQjm+XD0cuRHnI6muFhEPes6rlA==}
+    engines: {node: '>=20'}
+    cpu: [x64]
+    os: [win32]
+
+  '@moss-js/moss-core@0.27.0':
+    resolution: {integrity: sha512-nV/dHARKNLBI+BvoGWrmol+hfPqMPDVtQHrjlY4dJ/vl/nJUPESV5XWvrdOMlpQXQzD/tM/ESFKf8XvheJb4wQ==}
+    engines: {node: '>=20'}
+
+  '@moss-js/moss@1.12.0':
+    resolution: {integrity: sha512-O8rFgMg9RGI6s8qZWoh817qESMomQCfp5Z0xak3pbY6nYDOxafWiLJqcnm869iHbU1XFji6uqXsLTXm3l+lh6A==}
+    engines: {node: '>=20.4'}
 
   '@napi-rs/wasm-runtime@1.2.4':
     resolution: {integrity: sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g==}
@@ -2467,6 +2510,33 @@ snapshots:
   '@mongodb-js/saslprep@1.5.4':
     dependencies:
       sparse-bitfield: 3.0.3
+
+  '@moss-js/moss-core-darwin-arm64@0.27.0':
+    optional: true
+
+  '@moss-js/moss-core-darwin-x64@0.27.0':
+    optional: true
+
+  '@moss-js/moss-core-linux-arm64-gnu@0.27.0':
+    optional: true
+
+  '@moss-js/moss-core-linux-x64-gnu@0.27.0':
+    optional: true
+
+  '@moss-js/moss-core-win32-x64-msvc@0.27.0':
+    optional: true
+
+  '@moss-js/moss-core@0.27.0':
+    optionalDependencies:
+      '@moss-js/moss-core-darwin-arm64': 0.27.0
+      '@moss-js/moss-core-darwin-x64': 0.27.0
+      '@moss-js/moss-core-linux-arm64-gnu': 0.27.0
+      '@moss-js/moss-core-linux-x64-gnu': 0.27.0
+      '@moss-js/moss-core-win32-x64-msvc': 0.27.0
+
+  '@moss-js/moss@1.12.0':
+    dependencies:
+      '@moss-js/moss-core': 0.27.0
 
   '@napi-rs/wasm-runtime@1.2.4(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)':
     dependencies:
