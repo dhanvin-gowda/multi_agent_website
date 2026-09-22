@@ -12,7 +12,6 @@ const dev = !process.argv.includes("--production") && process.env.NODE_ENV !== "
 const app = next({ dev });
 const handle = app.getRequestHandler();
 const MOSS_INDEX_NAME = "team-chat";
-let handleUpgrade;
 let mongoClient;
 let database;
 let mossClient;
@@ -29,7 +28,6 @@ function bearerToken(request) { const header = request.headers.authorization || 
 async function userFromToken(token) { if (!token || !process.env.JWT_SECRET) return null; try { const claims = jwt.verify(token, process.env.JWT_SECRET); if (typeof claims === "string" || !claims.sub) return null; const user = await getDatabase().collection("users").findOne({ _id: new ObjectId(claims.sub) }); return user ? profile(user) : null; } catch { return null; } }
 
 await app.prepare();
-handleUpgrade = app.getUpgradeHandler();
 try { await ensureDatabase(); } catch (error) { console.error("MongoDB connection failed. Check MONGODB_URI and the Atlas network allowlist.", error instanceof Error ? error.message : error); process.exit(1); }
 const httpServer = createServer(async (request, response) => {
 	try {
@@ -83,7 +81,7 @@ socketServer.on("connection", (socket, user) => {
 });
 httpServer.on("upgrade", async (request, socket, head) => {
 	const requestUrl = new URL(request.url || "/", `http://${request.headers.host}`);
-	if (requestUrl.pathname !== "/ws") return handleUpgrade(request, socket, head);
+	if (requestUrl.pathname !== "/ws") return;
 	const token = requestUrl.searchParams.get("token") || "";
 	const user = await userFromToken(token);
 	if (!user) return socket.destroy();
