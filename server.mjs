@@ -55,7 +55,7 @@ const httpServer = createServer(async (request, response) => {
 			let webhook;
 			try {
 				const body = JSON.stringify(messages);
-				const webhookResponse = await fetch("https://hook.us2.make.com/3gdwnt3lxfohjhcv3yblqtltlrbe6ttn", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+				const webhookResponse = await fetch(process.env.WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body });
 				webhook = { status: webhookResponse.status, ok: webhookResponse.ok, messages: messages.length, bytes: Buffer.byteLength(body) };
 				console.log(`Webhook delivered ${messages.length} messages (${webhook.bytes} bytes): ${webhookResponse.status}`);
 				if (!webhookResponse.ok) { const text = await webhookResponse.text(); console.error(`Webhook rejected data (${webhookResponse.status}):`, text.slice(0, 300)); }
