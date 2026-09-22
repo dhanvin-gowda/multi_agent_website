@@ -1,4 +1,6 @@
+import "dotenv/config";
 import { createServer } from "node:http";
+import { setServers } from "node:dns";
 import next from "next";
 import { MongoClient, ObjectId } from "mongodb";
 import jwt from "jsonwebtoken";
@@ -16,6 +18,7 @@ let database;
 let mossClient;
 function getMossClient() { if (!mossClient) mossClient = new MossClient(process.env.MOSS_PROJECT_ID, process.env.MOSS_PROJECT_KEY); return mossClient; }
 
+setServers(["8.8.8.8", "1.1.1.1"]);
 function getDatabase() { if (!database) database = mongoClient.db("workspace_chat"); return database; }
 async function ensureDatabase() { mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000 }); await mongoClient.connect(); await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true }); }
 function profile(user) { return { id: user._id.toString(), name: user.name, email: user.email, initials: user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase(), color: "orange" }; }
@@ -51,7 +54,15 @@ const httpServer = createServer(async (request, response) => {
 			const indexes = await client.listIndexes();
 			const exists = indexes.some((index) => index.name === MOSS_INDEX_NAME);
 			const result = exists ? await client.addDocs(MOSS_INDEX_NAME, docs, { upsert: true }) : await client.createIndex(MOSS_INDEX_NAME, docs);
-			return sendJson(response, 200, { ok: true, indexed: docs.length, jobId: result.jobId });
+			let webhook;
+			try {
+				const body = JSON.stringify(messages);
+				const webhookResponse = await fetch("https://hook.us2.make.com/3gdwnt3lxfohjhcv3yblqtltlrbe6ttn", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+				webhook = { status: webhookResponse.status, ok: webhookResponse.ok, messages: messages.length, bytes: Buffer.byteLength(body) };
+				console.log(`Webhook delivered ${messages.length} messages (${webhook.bytes} bytes): ${webhookResponse.status}`);
+				if (!webhookResponse.ok) { const text = await webhookResponse.text(); console.error(`Webhook rejected data (${webhookResponse.status}):`, text.slice(0, 300)); }
+			} catch (error) { webhook = { ok: false, error: error instanceof Error ? error.message : String(error) }; console.error("Webhook failed:", error); }
+			return sendJson(response, 200, { ok: true, indexed: docs.length, jobId: result.jobId, webhook });
 		}
 		return handle(request, response);
 	} catch (error) { console.error(error); sendJson(response, 500, { error: "The server could not process that request." }); }
