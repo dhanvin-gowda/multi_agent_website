@@ -20,7 +20,7 @@ function getMossClient() { if (!mossClient) mossClient = new MossClient(process.
 
 setServers(["8.8.8.8", "1.1.1.1"]);
 function getDatabase() { if (!database) database = mongoClient.db("workspace_chat"); return database; }
-async function ensureDatabase() { mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000 }); await mongoClient.connect(); await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true }); }
+async function ensureDatabase() { mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15000 }); await mongoClient.connect(); await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true }); }
 function profile(user) { return { id: user._id.toString(), name: user.name, email: user.email, initials: user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase(), color: "orange" }; }
 function signUser(user) { if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is missing"); return jwt.sign({ sub: user._id.toString(), email: user.email }, process.env.JWT_SECRET, { expiresIn: "30d" }); }
 function readBody(request) { return new Promise((resolve, reject) => { let body = ""; request.on("data", (chunk) => { body += chunk; }); request.on("end", () => { try { resolve(JSON.parse(body || "{}")); } catch { reject(new Error("Invalid JSON")); } }); request.on("error", reject); }); }
