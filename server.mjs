@@ -17,9 +17,35 @@ let database;
 let mossClient;
 function getMossClient() { if (!mossClient) mossClient = new MossClient(process.env.MOSS_PROJECT_ID, process.env.MOSS_PROJECT_KEY); return mossClient; }
 
-setServers(["8.8.8.8", "1.1.1.1"]);
+try {
+	setServers(["8.8.8.8", "1.1.1.1", "223.5.5.5", "114.114.114.114"]);
+} catch (error) { console.warn("Could not override DNS resolvers:", error instanceof Error ? error.message : error); }
 function getDatabase() { if (!database) database = mongoClient.db("workspace_chat"); return database; }
-async function ensureDatabase() { mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15000 }); await mongoClient.connect(); await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true }); }
+const MONGO_TIMEOUT_MS = 60000;
+const MONGO_MAX_ATTEMPTS = 5;
+function startHeartbeat() {
+	setInterval(async () => {
+		try { await getDatabase().command({ ping: 1 }); } catch (error) { console.error("MongoDB heartbeat failed:", error instanceof Error ? error.message : error); }
+	}, 30000).unref();
+}
+async function ensureDatabase() {
+	for (let attempt = 1; attempt <= MONGO_MAX_ATTEMPTS; attempt++) {
+		mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: MONGO_TIMEOUT_MS });
+		try {
+			await mongoClient.connect();
+			await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true });
+			startHeartbeat();
+			return;
+		} catch (error) {
+			try { await mongoClient.close(); } catch (closeError) { console.warn("Failed to close failed MongoClient:", closeError instanceof Error ? closeError.message : closeError); }
+			mongoClient = undefined;
+			database = undefined;
+			console.error(`MongoDB connection attempt ${attempt}/${MONGO_MAX_ATTEMPTS} failed:`, error instanceof Error ? error.message : error);
+			if (attempt === MONGO_MAX_ATTEMPTS) throw error;
+			await new Promise((resolve) => setTimeout(resolve, 2500 * attempt));
+		}
+	}
+}
 function profile(user) { return { id: user._id.toString(), name: user.name, email: user.email, initials: user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase(), color: "orange" }; }
 function signUser(user) { if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is missing"); return jwt.sign({ sub: user._id.toString(), email: user.email }, process.env.JWT_SECRET, { expiresIn: "30d" }); }
 function readBody(request) { return new Promise((resolve, reject) => { let body = ""; request.on("data", (chunk) => { body += chunk; }); request.on("end", () => { try { resolve(JSON.parse(body || "{}")); } catch { reject(new Error("Invalid JSON")); } }); request.on("error", reject); }); }
@@ -28,7 +54,16 @@ function bearerToken(request) { const header = request.headers.authorization || 
 async function userFromToken(token) { if (!token || !process.env.JWT_SECRET) return null; try { const claims = jwt.verify(token, process.env.JWT_SECRET); if (typeof claims === "string" || !claims.sub) return null; const user = await getDatabase().collection("users").findOne({ _id: new ObjectId(claims.sub) }); return user ? profile(user) : null; } catch { return null; } }
 
 await app.prepare();
-try { await ensureDatabase(); } catch (error) { console.error("MongoDB connection failed. Check MONGODB_URI and the Atlas network allowlist.", error instanceof Error ? error.message : error); process.exit(1); }
+try { await ensureDatabase(); } catch (error) {
+	const message = error instanceof Error ? error.message : String(error);
+	let hint = "Check MONGODB_URI and the Atlas network allowlist.";
+	if (/querySrv|getaddrinfo|ENOTFOUND|EAI_AGAIN/.test(message)) hint = "DNS lookup failed. A proxy/VPN or ISP DNS blocking may prevent reaching mongodb.net.";
+	else if (/ECONNREFUSED/.test(message)) hint = "A DNS or connect request was refused. Check internet connectivity and proxy settings.";
+	else if (/timed out|ETIMEDOUT/.test(message)) hint = "Cluster unreachable. Likely an Atlas M0 cold start, or this machine's public IP is not in Atlas > Network Access.";
+	else if (/auth|authentication/.test(message)) hint = "Credentials rejected. Check the username and password in MONGODB_URI.";
+	console.error(`MongoDB connection failed after ${MONGO_MAX_ATTEMPTS} attempts. ${hint}`, message);
+	process.exit(1);
+}
 const httpServer = createServer(async (request, response) => {
 	try {
 		const url = new URL(request.url || "/", `http://${request.headers.host}`);
