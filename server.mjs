@@ -1,4 +1,6 @@
+import "dotenv/config";
 import { createServer } from "node:http";
+import { setServers } from "node:dns";
 import next from "next";
 import { MongoClient, ObjectId } from "mongodb";
 import jwt from "jsonwebtoken";
@@ -10,14 +12,40 @@ const dev = !process.argv.includes("--production") && process.env.NODE_ENV !== "
 const app = next({ dev });
 const handle = app.getRequestHandler();
 const MOSS_INDEX_NAME = "team-chat";
-let handleUpgrade;
 let mongoClient;
 let database;
 let mossClient;
 function getMossClient() { if (!mossClient) mossClient = new MossClient(process.env.MOSS_PROJECT_ID, process.env.MOSS_PROJECT_KEY); return mossClient; }
 
+try {
+	setServers(["8.8.8.8", "1.1.1.1", "223.5.5.5", "114.114.114.114"]);
+} catch (error) { console.warn("Could not override DNS resolvers:", error instanceof Error ? error.message : error); }
 function getDatabase() { if (!database) database = mongoClient.db("workspace_chat"); return database; }
-async function ensureDatabase() { mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000 }); await mongoClient.connect(); await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true }); }
+const MONGO_TIMEOUT_MS = 60000;
+const MONGO_MAX_ATTEMPTS = 5;
+function startHeartbeat() {
+	setInterval(async () => {
+		try { await getDatabase().command({ ping: 1 }); } catch (error) { console.error("MongoDB heartbeat failed:", error instanceof Error ? error.message : error); }
+	}, 30000).unref();
+}
+async function ensureDatabase() {
+	for (let attempt = 1; attempt <= MONGO_MAX_ATTEMPTS; attempt++) {
+		mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: MONGO_TIMEOUT_MS });
+		try {
+			await mongoClient.connect();
+			await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true });
+			startHeartbeat();
+			return;
+		} catch (error) {
+			try { await mongoClient.close(); } catch (closeError) { console.warn("Failed to close failed MongoClient:", closeError instanceof Error ? closeError.message : closeError); }
+			mongoClient = undefined;
+			database = undefined;
+			console.error(`MongoDB connection attempt ${attempt}/${MONGO_MAX_ATTEMPTS} failed:`, error instanceof Error ? error.message : error);
+			if (attempt === MONGO_MAX_ATTEMPTS) throw error;
+			await new Promise((resolve) => setTimeout(resolve, 2500 * attempt));
+		}
+	}
+}
 function profile(user) { return { id: user._id.toString(), name: user.name, email: user.email, initials: user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase(), color: "orange" }; }
 function signUser(user) { if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is missing"); return jwt.sign({ sub: user._id.toString(), email: user.email }, process.env.JWT_SECRET, { expiresIn: "30d" }); }
 function readBody(request) { return new Promise((resolve, reject) => { let body = ""; request.on("data", (chunk) => { body += chunk; }); request.on("end", () => { try { resolve(JSON.parse(body || "{}")); } catch { reject(new Error("Invalid JSON")); } }); request.on("error", reject); }); }
@@ -26,8 +54,16 @@ function bearerToken(request) { const header = request.headers.authorization || 
 async function userFromToken(token) { if (!token || !process.env.JWT_SECRET) return null; try { const claims = jwt.verify(token, process.env.JWT_SECRET); if (typeof claims === "string" || !claims.sub) return null; const user = await getDatabase().collection("users").findOne({ _id: new ObjectId(claims.sub) }); return user ? profile(user) : null; } catch { return null; } }
 
 await app.prepare();
-handleUpgrade = app.getUpgradeHandler();
-try { await ensureDatabase(); } catch (error) { console.error("MongoDB connection failed. Check MONGODB_URI and the Atlas network allowlist.", error instanceof Error ? error.message : error); process.exit(1); }
+try { await ensureDatabase(); } catch (error) {
+	const message = error instanceof Error ? error.message : String(error);
+	let hint = "Check MONGODB_URI and the Atlas network allowlist.";
+	if (/querySrv|getaddrinfo|ENOTFOUND|EAI_AGAIN/.test(message)) hint = "DNS lookup failed. A proxy/VPN or ISP DNS blocking may prevent reaching mongodb.net.";
+	else if (/ECONNREFUSED/.test(message)) hint = "A DNS or connect request was refused. Check internet connectivity and proxy settings.";
+	else if (/timed out|ETIMEDOUT/.test(message)) hint = "Cluster unreachable. Likely an Atlas M0 cold start, or this machine's public IP is not in Atlas > Network Access.";
+	else if (/auth|authentication/.test(message)) hint = "Credentials rejected. Check the username and password in MONGODB_URI.";
+	console.error(`MongoDB connection failed after ${MONGO_MAX_ATTEMPTS} attempts. ${hint}`, message);
+	process.exit(1);
+}
 const httpServer = createServer(async (request, response) => {
 	try {
 		const url = new URL(request.url || "/", `http://${request.headers.host}`);
@@ -51,7 +87,15 @@ const httpServer = createServer(async (request, response) => {
 			const indexes = await client.listIndexes();
 			const exists = indexes.some((index) => index.name === MOSS_INDEX_NAME);
 			const result = exists ? await client.addDocs(MOSS_INDEX_NAME, docs, { upsert: true }) : await client.createIndex(MOSS_INDEX_NAME, docs);
-			return sendJson(response, 200, { ok: true, indexed: docs.length, jobId: result.jobId });
+			let webhook;
+			try {
+				const body = JSON.stringify(messages);
+				const webhookResponse = await fetch(process.env.WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+				webhook = { status: webhookResponse.status, ok: webhookResponse.ok, messages: messages.length, bytes: Buffer.byteLength(body) };
+				console.log(`Webhook delivered ${messages.length} messages (${webhook.bytes} bytes): ${webhookResponse.status}`);
+				if (!webhookResponse.ok) { const text = await webhookResponse.text(); console.error(`Webhook rejected data (${webhookResponse.status}):`, text.slice(0, 300)); }
+			} catch (error) { webhook = { ok: false, error: error instanceof Error ? error.message : String(error) }; console.error("Webhook failed:", error); }
+			return sendJson(response, 200, { ok: true, indexed: docs.length, jobId: result.jobId, webhook });
 		}
 		return handle(request, response);
 	} catch (error) { console.error(error); sendJson(response, 500, { error: "The server could not process that request." }); }
@@ -72,7 +116,7 @@ socketServer.on("connection", (socket, user) => {
 });
 httpServer.on("upgrade", async (request, socket, head) => {
 	const requestUrl = new URL(request.url || "/", `http://${request.headers.host}`);
-	if (requestUrl.pathname !== "/ws") return handleUpgrade(request, socket, head);
+	if (requestUrl.pathname !== "/ws") return;
 	const token = requestUrl.searchParams.get("token") || "";
 	const user = await userFromToken(token);
 	if (!user) return socket.destroy();
