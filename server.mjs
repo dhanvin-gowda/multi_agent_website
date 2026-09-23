@@ -1,125 +1,18 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { setServers } from "node:dns";
 import next from "next";
-import { MongoClient, ObjectId } from "mongodb";
-import jwt from "jsonwebtoken";
-import { WebSocketServer } from "ws";
-import { MossClient } from "@moss-js/moss";
 
 const port = Number(process.env.PORT || 3000);
 const dev = !process.argv.includes("--production") && process.env.NODE_ENV !== "production";
 const app = next({ dev });
 const handle = app.getRequestHandler();
-const MOSS_INDEX_NAME = "team-chat";
-let mongoClient;
-let database;
-let mossClient;
-function getMossClient() { if (!mossClient) mossClient = new MossClient(process.env.MOSS_PROJECT_ID, process.env.MOSS_PROJECT_KEY); return mossClient; }
-
-try {
-	setServers(["8.8.8.8", "1.1.1.1", "223.5.5.5", "114.114.114.114"]);
-} catch (error) { console.warn("Could not override DNS resolvers:", error instanceof Error ? error.message : error); }
-function getDatabase() { if (!database) database = mongoClient.db("workspace_chat"); return database; }
-const MONGO_TIMEOUT_MS = 60000;
-const MONGO_MAX_ATTEMPTS = 5;
-function startHeartbeat() {
-	setInterval(async () => {
-		try { await getDatabase().command({ ping: 1 }); } catch (error) { console.error("MongoDB heartbeat failed:", error instanceof Error ? error.message : error); }
-	}, 30000).unref();
-}
-async function ensureDatabase() {
-	for (let attempt = 1; attempt <= MONGO_MAX_ATTEMPTS; attempt++) {
-		mongoClient = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: MONGO_TIMEOUT_MS });
-		try {
-			await mongoClient.connect();
-			await getDatabase().collection("users").createIndex({ email: 1 }, { unique: true });
-			startHeartbeat();
-			return;
-		} catch (error) {
-			try { await mongoClient.close(); } catch (closeError) { console.warn("Failed to close failed MongoClient:", closeError instanceof Error ? closeError.message : closeError); }
-			mongoClient = undefined;
-			database = undefined;
-			console.error(`MongoDB connection attempt ${attempt}/${MONGO_MAX_ATTEMPTS} failed:`, error instanceof Error ? error.message : error);
-			if (attempt === MONGO_MAX_ATTEMPTS) throw error;
-			await new Promise((resolve) => setTimeout(resolve, 2500 * attempt));
-		}
-	}
-}
-function profile(user) { return { id: user._id.toString(), name: user.name, email: user.email, initials: user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase(), color: "orange" }; }
-function signUser(user) { if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is missing"); return jwt.sign({ sub: user._id.toString(), email: user.email }, process.env.JWT_SECRET, { expiresIn: "30d" }); }
-function readBody(request) { return new Promise((resolve, reject) => { let body = ""; request.on("data", (chunk) => { body += chunk; }); request.on("end", () => { try { resolve(JSON.parse(body || "{}")); } catch { reject(new Error("Invalid JSON")); } }); request.on("error", reject); }); }
-function sendJson(response, status, payload) { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(payload)); }
-function bearerToken(request) { const header = request.headers.authorization || ""; return header.startsWith("Bearer ") ? header.slice(7) : ""; }
-async function userFromToken(token) { if (!token || !process.env.JWT_SECRET) return null; try { const claims = jwt.verify(token, process.env.JWT_SECRET); if (typeof claims === "string" || !claims.sub) return null; const user = await getDatabase().collection("users").findOne({ _id: new ObjectId(claims.sub) }); return user ? profile(user) : null; } catch { return null; } }
 
 await app.prepare();
-try { await ensureDatabase(); } catch (error) {
-	const message = error instanceof Error ? error.message : String(error);
-	let hint = "Check MONGODB_URI and the Atlas network allowlist.";
-	if (/querySrv|getaddrinfo|ENOTFOUND|EAI_AGAIN/.test(message)) hint = "DNS lookup failed. A proxy/VPN or ISP DNS blocking may prevent reaching mongodb.net.";
-	else if (/ECONNREFUSED/.test(message)) hint = "A DNS or connect request was refused. Check internet connectivity and proxy settings.";
-	else if (/timed out|ETIMEDOUT/.test(message)) hint = "Cluster unreachable. Likely an Atlas M0 cold start, or this machine's public IP is not in Atlas > Network Access.";
-	else if (/auth|authentication/.test(message)) hint = "Credentials rejected. Check the username and password in MONGODB_URI.";
-	console.error(`MongoDB connection failed after ${MONGO_MAX_ATTEMPTS} attempts. ${hint}`, message);
-	process.exit(1);
-}
-const httpServer = createServer(async (request, response) => {
-	try {
-		const url = new URL(request.url || "/", `http://${request.headers.host}`);
-		if (url.pathname === "/api/auth/signup" && request.method === "POST") {
-			const body = await readBody(request); const cleanName = String(body.name || "").trim(); const cleanEmail = String(body.email || "").trim().toLowerCase();
-			if (cleanName.length < 2 || cleanName.length > 80) return sendJson(response, 400, { error: "Enter a name between 2 and 80 characters." });
-			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return sendJson(response, 400, { error: "Enter a valid email address." });
-			const users = getDatabase().collection("users"); const now = new Date();
-			const result = await users.findOneAndUpdate({ email: cleanEmail }, { $set: { name: cleanName, email: cleanEmail, updatedAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true, returnDocument: "after" });
-			const user = result.value || result; return sendJson(response, 200, { token: signUser(user), user: profile(user) });
-		}
-		if (url.pathname === "/api/auth/me" && request.method === "GET") { const user = await userFromToken(bearerToken(request)); return user ? sendJson(response, 200, { user }) : sendJson(response, 401, { error: "Session expired." }); }
-		if (url.pathname === "/api/chat/sync" && request.method === "POST") {
-			const user = await userFromToken(bearerToken(request));
-			if (!user) return sendJson(response, 401, { error: "Session expired." });
-			if (!process.env.MOSS_PROJECT_ID || !process.env.MOSS_PROJECT_KEY) return sendJson(response, 500, { error: "MOSS credentials are not configured." });
-			const messages = await getDatabase().collection("messages").find({}).sort({ createdAt: 1 }).toArray();
-			if (messages.length === 0) return sendJson(response, 200, { ok: true, indexed: 0, jobId: null });
-			const docs = messages.map((message) => ({ id: String(message._id), text: `${message.sender}: ${message.text}`, metadata: { sender: String(message.sender), senderId: String(message.senderId), time: String(message.time) } }));
-			const client = getMossClient();
-			const indexes = await client.listIndexes();
-			const exists = indexes.some((index) => index.name === MOSS_INDEX_NAME);
-			const result = exists ? await client.addDocs(MOSS_INDEX_NAME, docs, { upsert: true }) : await client.createIndex(MOSS_INDEX_NAME, docs);
-			let webhook;
-			try {
-				const body = JSON.stringify(messages);
-				const webhookResponse = await fetch(process.env.WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body });
-				webhook = { status: webhookResponse.status, ok: webhookResponse.ok, messages: messages.length, bytes: Buffer.byteLength(body) };
-				console.log(`Webhook delivered ${messages.length} messages (${webhook.bytes} bytes): ${webhookResponse.status}`);
-				if (!webhookResponse.ok) { const text = await webhookResponse.text(); console.error(`Webhook rejected data (${webhookResponse.status}):`, text.slice(0, 300)); }
-			} catch (error) { webhook = { ok: false, error: error instanceof Error ? error.message : String(error) }; console.error("Webhook failed:", error); }
-			return sendJson(response, 200, { ok: true, indexed: docs.length, jobId: result.jobId, webhook });
-		}
-		return handle(request, response);
-	} catch (error) { console.error(error); sendJson(response, 500, { error: "The server could not process that request." }); }
+
+const httpServer = createServer((request, response) => {
+	handle(request, response);
 });
 
-const socketServer = new WebSocketServer({ noServer: true });
-const clients = new Map();
-function broadcastPresence() {
-	const members = [...new Map([...clients.values()].map((user) => [user.id, { ...user, online: true }])).values()];
-	const payload = JSON.stringify({ type: "presence", members });
-	for (const client of clients.keys()) if (client.readyState === 1) client.send(payload);
-}
-socketServer.on("connection", (socket, user) => {
-	clients.set(socket, user);
-	broadcastPresence();
-	socket.on("message", (rawMessage) => { try { const payload = JSON.parse(rawMessage.toString()); if (payload.type !== "message" || !payload.message?.text) return; payload.message.senderId = user.id; payload.message.sender = user.name; payload.message.initials = user.initials; payload.message.color = user.color; const outgoing = JSON.stringify({ type: "message", message: payload.message }); for (const client of clients.keys()) if (client.readyState === 1) client.send(outgoing); getDatabase().collection("messages").insertOne({ _id: payload.message.id, senderId: user.id, sender: user.name, initials: user.initials, color: user.color, time: payload.message.time, text: payload.message.text, createdAt: new Date() }).catch((error) => { if (error?.code !== 11000) console.error("Failed to persist message:", error); }); } catch { /* Ignore malformed client payloads. */ } });
-	socket.on("close", () => { clients.delete(socket); broadcastPresence(); });
+httpServer.listen(port, () => {
+	console.log(`> Workspace chat ready on http://localhost:${port}`);
 });
-httpServer.on("upgrade", async (request, socket, head) => {
-	const requestUrl = new URL(request.url || "/", `http://${request.headers.host}`);
-	if (requestUrl.pathname !== "/ws") return;
-	const token = requestUrl.searchParams.get("token") || "";
-	const user = await userFromToken(token);
-	if (!user) return socket.destroy();
-	socketServer.handleUpgrade(request, socket, head, (client) => socketServer.emit("connection", client, user));
-});
-httpServer.listen(port, () => console.log(`> Workspace chat ready on http://localhost:${port}`));
