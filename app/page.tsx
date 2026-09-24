@@ -1,24 +1,47 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type User = { id: string; name: string; email: string; initials: string; color: string };
 type VoiceEntry = { id: number; speaker: string; text: string; time: string; kind: "user" | "assistant" };
+type AgentActivity = { id: number; agent: string; text: string; time: string };
 
-type SpeechRecognitionLike = {
-  lang: string;
-  interimResults: boolean;
-  continuous: boolean;
-  start: () => void;
-  stop: () => void;
-  onstart: (() => void) | null;
-  onend: (() => void) | null;
-  onerror: ((event: any) => void) | null;
-  onresult: ((event: any) => void) | null;
+type OmiTranscriptSegment = {
+  id?: string | null;
+  text: string;
+  speaker_id?: number | null;
+  speaker_name?: string | null;
+  start: number;
+  end: number;
+};
+
+type OmiConversation = {
+  id: string;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  title?: string;
+  overview?: string;
+  structured?: {
+    title?: string;
+    overview?: string;
+    action_items?: Array<{ description?: string }>;
+  };
+  transcript_segments?: OmiTranscriptSegment[] | null;
 };
 
 const USER_KEY = "workspace-chat-user";
 const VOICE_KEY = "workspace-voice-session";
+const SEEN_KEY = "workspace-omi-seen";
+const AGENT_ACTIVITY_KEY = "workspace-agent-activity";
+const POLL_INTERVAL_MS = 10000;
+
+const AGENT_AGENTS: { name: string; initials: string; color: string; role: string }[] = [
+  { name: "Omi Orchestrator", initials: "OM", color: "orange", role: "Routes every transcript" },
+  { name: "Chat agent", initials: "CH", color: "purple", role: "Explains and discusses" },
+  { name: "Research agent", initials: "RE", color: "blue", role: "Verifies and investigates" },
+  { name: "Coding agent", initials: "CO", color: "mint", role: "Writes and fixes code" },
+];
 
 function createInitials(name: string) {
   return name
@@ -56,20 +79,18 @@ function Icon({ children }: { children: string }) {
   return <span className="icon" aria-hidden="true">{children}</span>;
 }
 
-declare global {
-  interface Window {
-    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
-    SpeechRecognition?: new () => SpeechRecognitionLike;
-  }
-}
+const DEFAULT_VOICE_ENTRIES: VoiceEntry[] = [
+  { id: 1, speaker: "Local assistant", text: "Ready to capture your next voice update.", time: "Now", kind: "assistant" },
+];
 
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [isListening, setIsListening] = useState(false);
-  const [liveTranscript, setLiveTranscript] = useState("Press the microphone to start speaking.");
+  const [syncMessage, setSyncMessage] = useState("Tap the button and speak with your Omi device.");
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [voiceEntries, setVoiceEntries] = useState<VoiceEntry[]>(() => {
     if (typeof window === "undefined") {
-      return [{ id: 1, speaker: "Local assistant", text: "Ready to capture your next voice update.", time: "Now", kind: "assistant" }];
+      return DEFAULT_VOICE_ENTRIES;
     }
 
     try {
@@ -84,30 +105,65 @@ export default function Home() {
       // ignore invalid stored data and fall back below
     }
 
-    return [{ id: 1, speaker: "Local assistant", text: "Ready to capture your next voice update.", time: "Now", kind: "assistant" }];
+    return DEFAULT_VOICE_ENTRIES;
   });
 
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const [agentActivities, setAgentActivities] = useState<AgentActivity[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    try {
+      const saved = window.localStorage.getItem(AGENT_ACTIVITY_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as AgentActivity[];
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore invalid stored data and fall back to empty
+    }
+
+    return [];
+  });
+
+  const seenRef = useRef<Set<string> | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     try {
       const savedUser = window.localStorage.getItem(USER_KEY);
-      if (savedUser) {
-        const parsedUser = JSON.parse(savedUser) as User;
+      const parsedUser = savedUser ? (JSON.parse(savedUser) as User) : null;
+
+      queueMicrotask(() => {
         if (parsedUser?.name) {
           setUser(parsedUser);
-          return;
+        } else {
+          const guestUser = buildUser("Guest");
+          window.localStorage.setItem(USER_KEY, JSON.stringify(guestUser));
+          setUser(guestUser);
         }
-      }
+      });
     } catch {
       window.localStorage.removeItem(USER_KEY);
+      queueMicrotask(() => setUser(buildUser("Guest")));
     }
+  }, []);
 
-    const guestUser = buildUser("Guest");
-    window.localStorage.setItem(USER_KEY, JSON.stringify(guestUser));
-    setUser(guestUser);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    if (seenRef.current) return;
+
+    try {
+      const saved = window.localStorage.getItem(SEEN_KEY);
+      const parsed = saved ? (JSON.parse(saved) as string[]) : [];
+      seenRef.current = new Set(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      seenRef.current = new Set();
+    }
   }, []);
 
   useEffect(() => {
@@ -116,17 +172,18 @@ export default function Home() {
   }, [voiceEntries]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(AGENT_ACTIVITY_KEY, JSON.stringify(agentActivities));
+  }, [agentActivities]);
+
+  useEffect(() => {
     if (typeof window === "undefined" || !user) return;
     window.localStorage.setItem(USER_KEY, JSON.stringify(user));
   }, [user]);
 
-  useEffect(() => () => {
-    recognitionRef.current?.stop();
-  }, []);
-
-  function addVoiceEntry(speaker: string, text: string, kind: "user" | "assistant") {
+  const addVoiceEntry = useCallback((speaker: string, text: string, kind: "user" | "assistant") => {
     const nextEntry: VoiceEntry = {
-      id: Date.now(),
+      id: Date.now() + Math.random(),
       speaker,
       text,
       time: new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
@@ -134,81 +191,160 @@ export default function Home() {
     };
 
     setVoiceEntries((current) => [nextEntry, ...current].slice(0, 6));
-  }
+  }, []);
 
-  function stopListening() {
-    recognitionRef.current?.stop();
-    setIsListening(false);
-  }
+  const addAgentActivity = useCallback((agent: string, text: string) => {
+    const nextEntry: AgentActivity = {
+      id: Date.now() + Math.random(),
+      agent,
+      text,
+      time: new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+    };
 
-  function startListening() {
-    if (typeof window === "undefined") return;
+    setAgentActivities((current) => [nextEntry, ...current].slice(0, 20));
+  }, []);
 
-    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognitionCtor) {
-      setLiveTranscript("Voice recognition is not supported in this browser.");
-      return;
+  const orchestrateWithLyzr = useCallback(async (conversation: OmiConversation) => {
+    const title = conversation.structured?.title ?? conversation.title ?? "New Omi conversation";
+    const overview = conversation.structured?.overview ?? conversation.overview;
+    const segments = conversation.transcript_segments ?? [];
+
+    const lines: string[] = [title];
+    if (overview) {
+      lines.push(`Summary: ${overview}`);
     }
-
-    if (!recognitionRef.current) {
-      const recognition: SpeechRecognitionLike = new SpeechRecognitionCtor();
-      recognition.lang = "en-US";
-      recognition.interimResults = true;
-      recognition.continuous = true;
-
-      recognition.onstart = () => setIsListening(true);
-      recognition.onresult = (event: any) => {
-        let interimText = "";
-        let finalText = "";
-
-        for (let index = 0; index < event.results.length; index += 1) {
-          const result = event.results[index];
-          const line = result[0]?.transcript ?? "";
-
-          if (result.isFinal) {
-            finalText += `${line} `;
-          } else {
-            interimText += `${line} `;
-          }
-        }
-
-        const nextText = finalText.trim() || interimText.trim() || "Listening...";
-        setLiveTranscript(nextText);
-
-        if (finalText.trim()) {
-          addVoiceEntry(user?.name ?? "Guest", finalText.trim(), "user");
-          setLiveTranscript(finalText.trim());
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        const message = event?.error === "not-allowed"
-          ? "Microphone permission was blocked."
-          : "The microphone is unavailable right now.";
-        setLiveTranscript(message);
-        setIsListening(false);
-      };
-
-      recognition.onend = () => setIsListening(false);
-      recognitionRef.current = recognition;
+    lines.push("Transcript:");
+    for (const segment of segments) {
+      const speaker = segment.speaker_name?.trim() || `Speaker ${(segment.speaker_id ?? 0) + 1}`;
+      lines.push(`[${speaker}]: ${segment.text}`);
     }
 
     try {
-      if (isListening) {
-        stopListening();
+      const response = await fetch("/api/lyzr/orchestrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: conversation.id, transcriptText: lines.join("\n") }),
+      });
+      if (!response.ok) {
+        const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+        return detail?.error ?? `Lyzr responded with ${response.status}.`;
+      }
+      const data = (await response.json()) as { agent?: string | null; response?: string };
+      if (data.response) {
+        const speaker = data.agent || "Lyzr orchestrator";
+        addVoiceEntry(speaker, data.response, "assistant");
+        addAgentActivity(speaker, data.response);
+        return null;
+      }
+      return "Lyzr returned no response.";
+    } catch {
+      return "Could not reach Lyzr.";
+    }
+  }, [addVoiceEntry, addAgentActivity]);
+
+  const syncFromOmi = useCallback(async () => {
+    try {
+      const response = await fetch("/api/omi/conversations?limit=5&include_transcript=true");
+      if (!response.ok) {
+        setSyncMessage("Omi sync failed — check your API key and try again.");
         return;
       }
 
-      recognitionRef.current.start();
+      const conversations = (await response.json()) as OmiConversation[];
+      const sorted = [...conversations].sort((a, b) => {
+        const at = a.started_at ?? a.created_at ?? "";
+        const bt = b.started_at ?? b.created_at ?? "";
+        return bt.localeCompare(at);
+      });
+
+      const now = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      const fresh = sorted.filter((conversation) => !seenRef.current?.has(conversation.id));
+
+      let orchestrated = 0;
+      let failed = 0;
+
+      for (const conversation of fresh) {
+        seenRef.current ??= new Set();
+        seenRef.current.add(conversation.id);
+
+        const title = conversation.structured?.title ?? conversation.title ?? "New Omi conversation";
+        const overview = conversation.structured?.overview ?? conversation.overview;
+        addVoiceEntry("Omi assistant", overview || title, "assistant");
+
+        const segments = conversation.transcript_segments ?? [];
+        for (const segment of segments) {
+          const speaker = segment.speaker_name?.trim() || `Speaker ${(segment.speaker_id ?? 0) + 1}`;
+          addVoiceEntry(speaker, segment.text, "user");
+        }
+
+        const error = await orchestrateWithLyzr(conversation);
+        if (error) {
+          failed += 1;
+        } else {
+          orchestrated += 1;
+        }
+      }
+
+      if (fresh.length > 0) {
+        const seen = seenRef.current ?? new Set<string>();
+        seenRef.current = seen;
+        window.localStorage.setItem(SEEN_KEY, JSON.stringify(Array.from(seen)));
+      }
+
+      setLastSyncedAt(now);
+      if (fresh.length === 0) {
+        setSyncMessage(`No new conversations at ${now}.`);
+      } else if (failed > 0) {
+        setSyncMessage(`Synced ${fresh.length} new conversation${fresh.length === 1 ? "" : "s"} at ${now}. Lyzr: ${orchestrated} ok, ${failed} failed.`);
+      } else {
+        setSyncMessage(`Synced ${fresh.length} new conversation${fresh.length === 1 ? "" : "s"} and sent to Lyzr at ${now}.`);
+      }
     } catch {
-      setLiveTranscript("Microphone is already active. Try again in a moment.");
-      setIsListening(false);
+      setSyncMessage("Could not reach Omi right now.");
     }
+  }, [addVoiceEntry, orchestrateWithLyzr]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !isListening) return;
+
+    const interval = window.setInterval(() => {
+      syncFromOmi();
+    }, POLL_INTERVAL_MS);
+
+    window.setTimeout(() => {
+      syncFromOmi();
+    }, 0);
+
+    return () => window.clearInterval(interval);
+  }, [isListening, syncFromOmi]);
+
+  function toggleListening() {
+    const nextState = !isListening;
+    setIsListening(nextState);
+
+    if (nextState) {
+      setSyncMessage("Omi is listening. Press again to stop and transcribe.");
+      return;
+    }
+
+    setSyncMessage("Recording stopped. Transcribing with Omi...");
+    window.setTimeout(() => {
+      void syncFromOmi();
+    }, 300);
   }
 
   if (!user) return null;
 
   const assistantSummary = voiceEntries.find((entry) => entry.kind === "assistant")?.text ?? "Ready for your next update.";
+
+  const lastActiveAt: Record<string, string> = {};
+  const runCounts: Record<string, number> = {};
+  for (const entry of agentActivities) {
+    if (!lastActiveAt[entry.agent]) {
+      lastActiveAt[entry.agent] = entry.time;
+    }
+    runCounts[entry.agent] = (runCounts[entry.agent] ?? 0) + 1;
+  }
 
   return (
     <main className="workspace-shell">
@@ -224,6 +360,24 @@ export default function Home() {
           <button className="nav-item" type="button"><Icon>✦</Icon>Notes</button>
           <button className="nav-item" type="button"><Icon>✓</Icon>Recent Calls</button>
         </nav>
+
+        <div className="agents-nav" aria-label="Agents">
+          <div className="agents-title">Agents</div>
+          {AGENT_AGENTS.map((agent) => {
+            const active = lastActiveAt[agent.name];
+            const runs = runCounts[agent.name] ?? 0;
+            return (
+              <div className="agent-item" key={agent.name}>
+                <Avatar initials={agent.initials} color={agent.color} online={Boolean(active)} />
+                <div className="agent-copy">
+                  <strong>{agent.name}</strong>
+                  <small>{active ? `Active ${active}` : agent.role}</small>
+                </div>
+                {runs > 0 && <span className="agent-count">{runs}</span>}
+              </div>
+            );
+          })}
+        </div>
 
         <div className="profile">
           <Avatar initials={user.initials} color={user.color} online />
@@ -252,7 +406,7 @@ export default function Home() {
             <span className="voice-icon"><Icon>◉</Icon></span>
             <div>
               <h1>Voice room</h1>
-              <p><span className="connection-dot connected" />Local workspace</p>
+              <p><span className="connection-dot connected" />Omi{lastSyncedAt ? ` · ${lastSyncedAt}` : ""}</p>
             </div>
           </div>
           <div className="header-actions">
@@ -269,8 +423,8 @@ export default function Home() {
             <button
               className={`mic-button ${isListening ? "active" : ""}`}
               type="button"
-              aria-label={isListening ? "Stop listening" : "Start listening"}
-              onClick={startListening}
+              aria-label={isListening ? "Stop recording" : "Start recording with Omi"}
+              onClick={toggleListening}
             >
               <span className="mic-core">◉</span>
             </button>
@@ -282,14 +436,18 @@ export default function Home() {
             </div>
 
             <p className="voice-status">
-              {isListening ? "Your mic is live and listening." : "Tap the mic and speak."}
+              {isListening
+                ? "Omi is actively listening. Click again to stop and transcribe."
+                : "Tap to start recording with Omi."}
             </p>
           </div>
 
           <div className="voice-transcript">
             <div className="transcript-header">
               <span>Live transcript</span>
-              <button type="button" onClick={stopListening}>Stop</button>
+              {isListening && (
+                <button type="button" onClick={toggleListening}>Stop</button>
+              )}
             </div>
 
             <div className="transcript-body">
@@ -297,7 +455,7 @@ export default function Home() {
                 <Avatar initials={user.initials} color={user.color} />
                 <strong>{user.name}</strong>
               </div>
-              <p>{liveTranscript}</p>
+              <p>{syncMessage}</p>
             </div>
           </div>
         </div>
@@ -321,6 +479,32 @@ export default function Home() {
             </article>
           ))}
         </div>
+
+        <div className="voice-activity agent-activity">
+          <div className="activity-header">
+            <h2>Agent activity</h2>
+            <span>{agentActivities.length} runs</span>
+          </div>
+
+          {agentActivities.length === 0 ? (
+            <p className="activity-empty">
+              Orchestrated agent runs will show up here as Omi conversations are processed.
+            </p>
+          ) : (
+            agentActivities.map((entry) => (
+              <article className="voice-entry assistant" key={entry.id}>
+                <div className="entry-avatar">{entry.agent.charAt(0)}</div>
+                <div className="entry-copy">
+                  <div className="entry-meta">
+                    <strong>{entry.agent}</strong>
+                    <time>{entry.time}</time>
+                  </div>
+                  <p>{entry.text}</p>
+                </div>
+              </article>
+            ))
+          )}
+        </div>
       </section>
 
       <aside className="assistant-panel">
@@ -338,7 +522,9 @@ export default function Home() {
         </div>
 
         <div className="assistant-actions">
-          <button type="button">Record</button>
+          <button type="button" onClick={toggleListening}>
+            {isListening ? "Stop Recording" : "Record"}
+          </button>
           <button type="button">Notes</button>
         </div>
       </aside>
