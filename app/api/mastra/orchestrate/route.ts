@@ -1,13 +1,12 @@
-import { NextResponse } from "next/server";
-import { z } from "zod";
-import { omiOrchestratorWorkflow, MASTRA_AGENT_REGISTRY } from "@/src/mastra/workflows/omi-orchestrator-workflow";
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { omiOrchestratorWorkflow, MASTRA_AGENT_REGISTRY } from '@/src/mastra/workflows/omi-orchestrator-workflow';
 
-// Backward-compatible export of AGENT_REGISTRY
-export const AGENT_REGISTRY = MASTRA_AGENT_REGISTRY;
+export { MASTRA_AGENT_REGISTRY as AGENT_REGISTRY };
 
 const requestSchema = z.object({
   conversationId: z.string().optional().default(() => `omi-${Date.now()}`),
-  transcriptText: z.string().min(1, "Transcript text is required"),
+  transcriptText: z.string().min(1, 'Transcript text is required'),
 });
 
 export async function POST(request: Request) {
@@ -17,7 +16,7 @@ export async function POST(request: Request) {
     const rawJson = await request.json();
     body = requestSchema.parse(rawJson);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Invalid payload";
+    const msg = err instanceof Error ? err.message : 'Invalid payload';
     return NextResponse.json({ error: msg }, { status: 400 });
   }
 
@@ -38,15 +37,15 @@ export async function POST(request: Request) {
       },
     });
 
-    if (runResult.status === "success" && runResult.result) {
+    if (runResult.status === 'success' && runResult.result) {
       return NextResponse.json(runResult.result, {
-        headers: { "Cache-Control": "no-store" },
+        headers: { 'Cache-Control': 'no-store' },
       });
     }
 
-    throw new Error("Workflow execution failed or produced incomplete results");
+    throw new Error('Workflow execution failed or produced incomplete results');
   } catch (error: unknown) {
-    const errorMsg = error instanceof Error ? error.message : "Mastra Orchestration failed";
+    const errorMsg = error instanceof Error ? error.message : 'Mastra Orchestration failed';
     const durationMs = Date.now() - startTime;
 
     return NextResponse.json(
@@ -59,25 +58,25 @@ export async function POST(request: Request) {
           startedAt: nowIso,
           completedAt: new Date().toISOString(),
           durationMs,
-          status: "failed",
+          status: 'failed',
           transcriptText,
           steps: [
             {
               step: 1,
-              id: "ingestion",
-              name: "Omi Audio & Transcript Ingestion",
-              status: "completed",
-              timestamp: new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
-              description: "Received voice transcript from Omi wearable.",
+              id: 'ingestion',
+              name: 'Omi Audio & Transcript Ingestion',
+              status: 'completed',
+              timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+              description: 'Received voice transcript from Omi wearable.',
             },
             {
               step: 2,
-              id: "failure",
-              name: "Execution Error",
-              status: "failed",
-              timestamp: new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+              id: 'failure',
+              name: 'Execution Error',
+              status: 'failed',
+              timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
               description: errorMsg,
-              badge: "Failed",
+              badge: 'Failed',
               details: { error: errorMsg },
             },
           ],
